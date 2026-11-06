@@ -25,8 +25,7 @@ Badges use your theme's green and yellow, then turn red at `warnPercent`:
 You need `python3`. `secret-tool` is only needed for the optional Admin API keys.
 
 ```bash
-omarchy plugin add https://github.com/HeyitsTayters/tokengauge-omarchy.git
-omarchy plugin enable dev.tayters.tokengauge --section right
+omarchy plugin add https://github.com/HeyitsTayters/tokengauge-omarchy.git --enable
 ```
 
 Update it with `omarchy plugin update dev.tayters.tokengauge`.
