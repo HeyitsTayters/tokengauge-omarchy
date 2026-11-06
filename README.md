@@ -22,14 +22,28 @@ Badges use your theme's green and yellow, then turn red at `warnPercent`:
 
 ## Install
 
-You need `python3`. There's nothing else to install.
+You need `python3`. `secret-tool` is only needed for the optional Admin API keys.
 
 ```bash
 omarchy plugin add https://github.com/HeyitsTayters/tokengauge-omarchy.git
-omarchy plugin enable dev.tayters.tokengauge --before omarchy.agents
+omarchy plugin enable dev.tayters.tokengauge --section right
 ```
 
 Update it with `omarchy plugin update dev.tayters.tokengauge`.
+
+## Remove
+
+```bash
+omarchy plugin remove dev.tayters.tokengauge
+rm -rf ~/.cache/tokengauge
+```
+
+If you stored Admin API keys, clear them too:
+
+```bash
+secret-tool clear service dev.tokengauge.apikeys account anthropic-admin
+secret-tool clear service dev.tokengauge.apikeys account openai-admin
+```
 
 ## Use
 
@@ -111,3 +125,7 @@ minutes per bar.
 ```bash
 python3 -m unittest discover tests
 ```
+
+## License
+
+[MIT](LICENSE)
