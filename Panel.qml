@@ -38,6 +38,9 @@ Panel {
 
   readonly property string gaugeGlyph: String.fromCodePoint(0xf029a)    // md-gauge
   readonly property string refreshGlyph: String.fromCodePoint(0xf0450)  // md-refresh
+  readonly property string sparkleGlyph: String.fromCodePoint(0xf0ae2)  // md-star_four_points
+  readonly property string codeGlyph: String.fromCodePoint(0xf0174)     // md-code_tags
+  readonly property string apiGlyph: String.fromCodePoint(0xf109b)      // md-api
 
   // ---- theme colors
   // The shell exposes red as `urgent` but not green or yellow, so take those
@@ -293,11 +296,8 @@ Panel {
           horizontalItemAlignment: Grid.AlignHCenter
           verticalItemAlignment: Grid.AlignVCenter
 
-          BrandGlyph {
+          ToolGlyph {
             provider: badge.modelData.id
-            tint: root.fg
-            width: Style.space(13)
-            height: width
           }
 
           BarText {
@@ -460,52 +460,16 @@ Panel {
     font.pixelSize: Style.font.caption
   }
 
-  // The Claude spark and the OpenAI knot from the macOS app.
-  component BrandGlyph: Canvas {
-    id: glyph
+  // Generic icons rather than company logos.
+  component ToolGlyph: Text {
     property string provider: ""
     property color tint: root.fg
-    readonly property bool spark: provider === "claudeCode" || provider === "anthropicAPI"
-
-    onTintChanged: requestPaint()
-    onProviderChanged: requestPaint()
-    onWidthChanged: requestPaint()
-
-    onPaint: {
-      var ctx = getContext("2d")
-      ctx.reset()
-      var r = Math.min(width, height) / 2
-      ctx.translate(width / 2, height / 2)
-      ctx.strokeStyle = tint
-      if (spark) {
-        // Blunt rays of uneven length and spacing give a hand-drawn look.
-        var rays = [[-90, 0.92], [-58, 0.80], [-27, 0.90], [5, 0.78], [36, 0.92], [66, 0.82],
-                    [97, 0.90], [128, 0.80], [158, 0.92], [190, 0.78], [221, 0.88], [250, 0.80]]
-        var w = r * 0.22
-        ctx.lineWidth = w
-        ctx.lineCap = "round"
-        ctx.beginPath()
-        for (var i = 0; i < rays.length; i++) {
-          var a = rays[i][0] * Math.PI / 180
-          var l = r * rays[i][1] - w / 2
-          ctx.moveTo(0, 0)
-          ctx.lineTo(Math.cos(a) * l, Math.sin(a) * l)
-        }
-        ctx.stroke()
-      } else {
-        // Six rounded links, 60° apart and offset from center, interlock.
-        ctx.lineWidth = r * 0.15
-        for (var j = 0; j < 6; j++) {
-          ctx.save()
-          ctx.rotate(j * Math.PI / 3)
-          ctx.translate(r * 0.24, 0)
-          ctx.beginPath()
-          ctx.roundedRect(-r * 0.27, -r * 0.86, r * 0.54, r * 1.06, r * 0.27, r * 0.27)
-          ctx.stroke()
-          ctx.restore()
-        }
-      }
-    }
+    textFormat: Text.PlainText
+    text: provider === "claudeCode" ? root.sparkleGlyph : (provider === "codex" ? root.codeGlyph : root.apiGlyph)
+    color: tint
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.title
+    renderType: Text.NativeRendering
   }
 
   component LimitRow: Column {
@@ -660,12 +624,10 @@ Panel {
         width: parent.width
         height: Math.max(cardTitle.implicitHeight, Style.space(14))
 
-        BrandGlyph {
+        ToolGlyph {
           id: cardGlyph
           anchors.verticalCenter: parent.verticalCenter
           provider: card.provider.id || ""
-          width: Style.space(14)
-          height: width
         }
 
         PlainLabel {
