@@ -38,9 +38,6 @@ Panel {
 
   readonly property string gaugeGlyph: String.fromCodePoint(0xf029a)    // md-gauge
   readonly property string refreshGlyph: String.fromCodePoint(0xf0450)  // md-refresh
-  readonly property string sparkleGlyph: String.fromCodePoint(0xf0ae2)  // md-star_four_points
-  readonly property string codeGlyph: String.fromCodePoint(0xf0174)     // md-code_tags
-  readonly property string apiGlyph: String.fromCodePoint(0xf109b)      // md-api
 
   // ---- theme colors
   // The shell exposes red as `urgent` but not green or yellow, so take those
@@ -460,16 +457,62 @@ Panel {
     font.pixelSize: Style.font.caption
   }
 
-  // Generic icons rather than company logos.
-  component ToolGlyph: Text {
+  // Hand-drawn marks in the style of Claude and ChatGPT, tuned to stay legible
+  // at bar size.
+  component ToolGlyph: Canvas {
+    id: glyph
     property string provider: ""
     property color tint: root.fg
-    textFormat: Text.PlainText
-    text: provider === "claudeCode" ? root.sparkleGlyph : (provider === "codex" ? root.codeGlyph : root.apiGlyph)
-    color: tint
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.title
-    renderType: Text.NativeRendering
+    readonly property bool spark: provider === "claudeCode" || provider === "anthropicAPI"
+
+    width: Style.space(16)
+    height: width
+
+    onTintChanged: requestPaint()
+    onProviderChanged: requestPaint()
+    onWidthChanged: requestPaint()
+
+    onPaint: {
+      var ctx = getContext("2d")
+      ctx.reset()
+      var r = Math.min(width, height) / 2
+      ctx.translate(width / 2, height / 2)
+      ctx.fillStyle = tint
+      ctx.strokeStyle = tint
+      if (spark) {
+        // Rays of uneven length and spacing, narrow at the center and blunt at
+        // the tip, so they stay separate instead of merging into a disc.
+        var rays = [[-90, 0.98], [-58, 0.84], [-27, 0.96], [5, 0.82], [36, 0.98], [66, 0.86],
+                    [97, 0.96], [128, 0.84], [158, 0.98], [190, 0.82], [221, 0.94], [250, 0.84]]
+        var base = r * 0.035
+        var tip = r * 0.085
+        for (var i = 0; i < rays.length; i++) {
+          var a = rays[i][0] * Math.PI / 180
+          var ux = Math.cos(a)
+          var uy = Math.sin(a)
+          var l = r * rays[i][1] - tip
+          ctx.beginPath()
+          ctx.moveTo(-uy * base, ux * base)
+          ctx.lineTo(ux * l - uy * tip, uy * l + ux * tip)
+          ctx.arc(ux * l, uy * l, tip, a + Math.PI / 2, a - Math.PI / 2, true)
+          ctx.lineTo(uy * base, -ux * base)
+          ctx.closePath()
+          ctx.fill()
+        }
+      } else {
+        // Six rounded links, 60° apart and offset from center, interlock.
+        ctx.lineWidth = r * 0.13
+        for (var j = 0; j < 6; j++) {
+          ctx.save()
+          ctx.rotate(j * Math.PI / 3)
+          ctx.translate(r * 0.30, 0)
+          ctx.beginPath()
+          ctx.roundedRect(-r * 0.23, -r * 0.90, r * 0.46, r * 1.0, r * 0.23, r * 0.23)
+          ctx.stroke()
+          ctx.restore()
+        }
+      }
+    }
   }
 
   component LimitRow: Column {
