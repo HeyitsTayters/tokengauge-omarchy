@@ -1,0 +1,18 @@
+{
+  "panel.title": "Token usage",
+  "panel.today": "Today %1",
+  "panel.todayUpdated": "Today %1 · updated %2",
+  "panel.loading": "Loading…",
+  "panel.noProviders": "No providers enabled.",
+  "panel.backendDown": "The TokenGauge backend isn't running. It needs python3.",
+  "panel.refresh": "Refresh",
+  "card.totals": "%1 today · %2 7d",
+  "card.resets": "resets in %1",
+  "card.breakdown": "Breakdown (today / 7d)",
+  "card.input": "Input",
+  "card.output": "Output",
+  "card.cacheWrite": "Cache write",
+  "card.cacheRead": "Cache read",
+  "bar.limits": "%1 %2",
+  "bar.tokensToday": "%1 tokens today"
+}

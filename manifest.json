@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "dev.tayters.tokengauge",
+  "name": "TokenGauge",
+  "version": "1.0.0",
+  "author": "tayters",
+  "license": "MIT",
+  "description": "Claude Code and Codex plan limits as colored bar badges, with token usage by day and model.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "TokenGauge",
+    "description": "Session and weekly limits per tool at a glance, colored green, yellow and red. Click for token usage by day and model, right-click to refresh.",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
