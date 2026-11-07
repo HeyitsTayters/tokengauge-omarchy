@@ -4,6 +4,7 @@
   "panel.todayUpdated": "Today %1 · updated %2",
   "panel.loading": "Loading…",
   "panel.noProviders": "No providers enabled.",
+  "panel.agents": "Agents",
   "panel.backendDown": "The TokenGauge backend isn't running. It needs python3.",
   "panel.refresh": "Refresh",
   "card.totals": "%1 today · %2 7d",

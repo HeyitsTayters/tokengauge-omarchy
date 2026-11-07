@@ -2,13 +2,15 @@
 """TokenGauge backend: AI token usage and plan limits as JSON.
 
 A Linux port of the provider logic in the TokenGauge macOS app. Reads Claude
-Code and Codex CLI session logs, Claude plan limits from the endpoint behind
-Claude Code's /usage screen, and optionally org usage from the Anthropic and
-OpenAI Admin APIs.
+Code and Codex CLI session logs, takes plan limits and every other agent from
+the usage records Omarchy's own collectors keep, and optionally org usage from
+the Anthropic and OpenAI Admin APIs. Without those records it falls back to the
+endpoint behind Claude Code's /usage screen and the limits in Codex's logs.
 
   tokengauge.py                  print one snapshot and exit
   tokengauge.py --watch          print a JSON line every --interval seconds;
-                                 any line on stdin refreshes now, EOF exits
+                                 a line on stdin refreshes now, "hide <id>" and
+                                 "show <id>" also set an agent, EOF exits
 
 Standard library only. Nothing but the numbers shown in the widget is cached.
 """
@@ -19,6 +21,7 @@ import json
 import os
 import re
 import select
+import shutil
 import subprocess
 import sys
 import time
@@ -37,6 +40,9 @@ DAY = 86400
 MAX_RESPONSE = 4 * 1024 * 1024
 MAX_PAGES = 20
 API_TTL = 300
+AGENT_TTL = 900
+# Omarchy's record names for the two agents read from their own logs too.
+RECORD_IDS = {"claudeCode": "claude", "codex": "codex"}
 
 
 @dataclass
@@ -99,6 +105,24 @@ def local_midnight(day):
 
 def clock(ts):
     return datetime.fromtimestamp(ts).strftime("%H:%M")
+
+
+def state_home():
+    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+
+
+def cache_home():
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+
+
+def valid_id(value):
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,40}", value) is not None
+
+
+def clean_name(value, fallback):
+    """Omarchy's tooltip isn't plain text, so a name that reaches it can't carry markup."""
+    name = re.sub(r"[^\w .+-]", "", value)[:40].strip() if isinstance(value, str) else ""
+    return name or fallback
 
 
 def jsonl(path, needle):
@@ -230,8 +254,7 @@ class ClaudeAccount:
     """
 
     def __init__(self):
-        cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-        self.path = cache / "tokengauge" / "claude-limits.json"
+        self.path = cache_home() / "tokengauge" / "claude-limits.json"
         self.lock = self.path.with_suffix(".lock")
         self.state = {}
 
@@ -364,7 +387,167 @@ def budget_window(label, used, budget, resets_at=None):
     return limit(label, percent, resets_at, detail)
 
 
-def claude_code(options, cache, account):
+# ---- Omarchy usage records
+
+
+class OmarchyUsage:
+    """The records `omarchy-agent-usage-update` keeps, one per agent.
+
+    Omarchy's Agents widget runs that command itself, so it only runs here when
+    nothing has refreshed the records for AGENT_TTL. That check is shared on
+    disk because every bar runs its own backend. It runs in the background, and
+    the next snapshot picks up what it wrote.
+    """
+
+    def __init__(self):
+        self.folder = state_home() / "omarchy" / "agents" / "usage"
+        self.stamp = cache_home() / "tokengauge" / "agents-updated"
+        self.command = shutil.which("omarchy-agent-usage-update")
+        self.process = None
+
+    def read(self):
+        records = {}
+        try:
+            paths = list(self.folder.glob("*.json"))
+        except OSError:
+            return records
+        for path in paths:
+            try:
+                record = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(record, dict) and record.get("schemaVersion") == 1 and record.get("id") == path.stem \
+                    and valid_id(path.stem):
+                records[path.stem] = record
+        return records
+
+    def newest(self):
+        try:
+            return max((path.stat().st_mtime for path in self.folder.glob("*.json")), default=0)
+        except OSError:
+            return 0
+
+    def update(self, skip, now):
+        if not self.command or (self.process and self.process.poll() is None):
+            return
+        try:
+            self.stamp.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with open(self.stamp.with_suffix(".lock"), "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                try:
+                    started = float(self.stamp.read_text())
+                except (OSError, ValueError):
+                    started = 0
+                if now - max(started, self.newest()) < AGENT_TTL:
+                    return
+                self.stamp.write_text(str(now))
+            command = [self.command]
+            for agent in sorted(skip):
+                command += ["--except", agent]
+            self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+
+
+def record_limits(record, now):
+    """Limit windows from a record. Records hold them as fractions, not percents."""
+    entries = record.get("limits")
+    limits = []
+    for entry in entries if isinstance(entries, list) else []:
+        percent = entry.get("percent") if isinstance(entry, dict) else None
+        if not isinstance(percent, (int, float)) or isinstance(percent, bool) or percent < 0:
+            continue
+        label = entry.get("title") or entry.get("label")
+        label = label[:40] if isinstance(label, str) and label else "Limit"
+        resets = parse_time(entry.get("resetsAt"))
+        expired = resets is not None and resets <= now
+        limits.append(limit(label, 0 if expired else percent * 100, None if expired else resets,
+                            "reset" if expired else None))
+    return limits
+
+
+def record_note(record, now):
+    parts = []
+    plan = record.get("tierLabel")
+    if isinstance(plan, str) and plan:
+        parts.append(f"Plan: {plan[:40]}")
+    fetched = as_int(record.get("limitsFetchedAt")) / 1000
+    if fetched and (record.get("limitsStale") or now - fetched > 3600):
+        parts.append(f"limits as of {clock(fetched)}")
+    for key in ("usageStatusText", "authHelpText"):
+        text = record.get(key)
+        if isinstance(text, str) and text:
+            parts.append(text[:160])
+            break
+    return " · ".join(parts) or None
+
+
+def uses_record(record):
+    """Whether Omarchy tracks this agent here. An agent the machine doesn't use
+    still gets a record, an empty one."""
+    return bool(record) and record.get("ready") is True
+
+
+def record_agent(record, now):
+    """A provider built from a record alone. Its token counts come as one total
+    that includes cache reads, so there's no input/output breakdown to show."""
+    today = date.fromtimestamp(now)
+    days = [(today - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+    entries = record.get("recentDays")
+    per_day = {entry.get("date"): as_int(entry.get("messageCount"))
+               for entry in (entries if isinstance(entries, list) else []) if isinstance(entry, dict)}
+    daily = [{"day": day, "tokens": per_day.get(day, 0)} for day in days]
+
+    def totals(tokens):
+        return Tokens(input=tokens).json()
+
+    models = record.get("todayTokensByModel")
+    models = models if isinstance(models, dict) and per_day.get(days[-1]) else {}
+    ranked = sorted(((str(name), as_int(tokens)) for name, tokens in models.items()), key=lambda item: -item[1])
+    return {
+        "id": record["id"],
+        "name": clean_name(record.get("name"), record["id"]),
+        "today": totals(per_day.get(days[-1], 0)),
+        "week": totals(sum(entry["tokens"] for entry in daily)),
+        "daily": daily,
+        "limits": record_limits(record, now),
+        "topModels": [{"name": name, "tokens": tokens} for name, tokens in ranked[:4]],
+        "note": record_note(record, now),
+        "error": None,
+        "breakdown": False,
+    }
+
+
+class HiddenAgents:
+    """Agents switched off in the panel. Kept in state, not the cache, so a
+    cache cleanup doesn't bring them back."""
+
+    def __init__(self):
+        self.path = state_home() / "tokengauge" / "hidden.json"
+
+    def load(self):
+        try:
+            value = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return set()
+        return {agent for agent in value if valid_id(agent)} if isinstance(value, list) else set()
+
+    def set(self, agent, hidden):
+        try:
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with open(self.path.with_suffix(".lock"), "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                agents = self.load()
+                (agents.add if hidden else agents.discard)(agent)
+                temp = self.path.with_suffix(".tmp")
+                temp.write_text(json.dumps(sorted(agents)))
+                os.replace(temp, self.path)
+        except OSError:
+            pass
+
+
+def claude_code(options, cache, account, record=None):
     home = os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"
     root = Path(home) / "projects"
     if not root.is_dir():
@@ -397,7 +580,15 @@ def claude_code(options, cache, account):
     rolling = sum(event.tokens.billable for event in events if event.ts >= now - 7 * DAY)
     snap["limits"] = [block, budget_window("Rolling 7 days", rolling, options.weekly_budget)]
 
-    if options.account_limits:
+    # Omarchy already asks for these, so asking too would only spend the
+    # endpoint's rate limit. Its record says what's wrong if it has none.
+    if uses_record(record):
+        limits = record_limits(record, now)
+        snap["note"] = record_note(record, now)
+        if limits:
+            snap["limits"] = limits
+            return snap
+    elif options.account_limits:
         try:
             limits, note = account.fetch()
             if limits:
@@ -406,7 +597,7 @@ def claude_code(options, cache, account):
         except Failure as error:
             snap["note"] = f"{error}. Showing local token counts."
             return snap
-    if not options.block_budget and not options.weekly_budget:
+    if not options.block_budget and not options.weekly_budget and not snap["note"]:
         snap["note"] = "Set blockBudget and weeklyBudget to see % gauges."
     return snap
 
@@ -449,7 +640,7 @@ def parse_codex(path):
     return events, rate
 
 
-def codex(cache):
+def codex(cache, record=None):
     home = os.environ.get("CODEX_HOME") or Path.home() / ".codex"
     root = Path(home) / "sessions"
     if not root.is_dir():
@@ -459,6 +650,12 @@ def codex(cache):
     # Look back further than a week so a weekly-limit snapshot from an older session is still found.
     parsed = cache.scan(root, now - 10 * DAY)
     snap = snapshot("codex", "Codex", [event for events, _ in parsed for event in events], now)
+
+    # Omarchy asks Codex directly, so its limits are newer than the logs' last session.
+    limits = record_limits(record, now) if uses_record(record) else []
+    if limits:
+        snap["limits"], snap["note"] = limits, record_note(record, now)
+        return snap
 
     rates = [rate for _, rate in parsed if rate]
     if not rates:
@@ -608,18 +805,46 @@ class Collector:
         self.account = ClaudeAccount()
         self.anthropic = ApiCache("anthropicAPI", "Anthropic API", anthropic_api)
         self.openai = ApiCache("openAIAPI", "OpenAI API", openai_api)
+        self.usage = OmarchyUsage()
+        self.hidden = HiddenAgents()
 
     def collect(self):
-        options, providers = self.options, []
+        options, providers, agents = self.options, [], []
+        now, hidden = time.time(), self.hidden.load()
+        records = {}
+        if options.omarchy:
+            off = {RECORD_IDS.get(agent, agent) for agent in hidden}
+            off |= set() if options.claude and options.account_limits else {"claude"}
+            off |= set() if options.codex else {"codex"}
+            self.usage.update(off, now)
+            records = self.usage.read()
+
+        def offer(agent, name, build):
+            agents.append({"id": agent, "name": name, "hidden": agent in hidden})
+            if agent not in hidden:
+                providers.append(build())
+
         if options.claude:
-            providers.append(claude_code(options, self.claude_cache, self.account))
+            offer("claudeCode", "Claude Code",
+                  lambda: claude_code(options, self.claude_cache, self.account,
+                                      records.get("claude") if options.account_limits else None))
         if options.codex:
-            providers.append(codex(self.codex_cache))
+            offer("codex", "Codex", lambda: codex(self.codex_cache, records.get("codex")))
+        for agent, record in sorted(records.items()):
+            if agent not in RECORD_IDS.values() and uses_record(record):
+                offer(agent, clean_name(record.get("name"), agent), lambda r=record: record_agent(r, now))
         if options.anthropic_api:
             providers.append(self.anthropic.get())
         if options.openai_api:
             providers.append(self.openai.get())
-        return {"schemaVersion": 1, "updated": time.time(), "providers": providers}
+        return {"schemaVersion": 1, "updated": now, "providers": providers, "agents": agents}
+
+    def command(self, data):
+        """Act on lines from stdin. Anything but hide and show is just a refresh."""
+        for line in data.decode("utf-8", "replace").splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] in ("hide", "show") and valid_id(parts[1]):
+                self.hidden.set(parts[1], parts[0] == "hide")
 
 
 def watch(collector, interval):
@@ -627,8 +852,11 @@ def watch(collector, interval):
         print(json.dumps(collector.collect(), separators=(",", ":")), flush=True)
         ready, _, _ = select.select([0], [], [], interval)
         # The shell holds stdin open, so EOF means it's gone and we should be too.
-        if ready and not os.read(0, 4096):
-            return
+        if ready:
+            data = os.read(0, 4096)
+            if not data:
+                return
+            collector.command(data)
 
 
 def main():
@@ -638,7 +866,9 @@ def main():
     parser.add_argument("--no-claude", dest="claude", action="store_false")
     parser.add_argument("--no-codex", dest="codex", action="store_false")
     parser.add_argument("--no-account-limits", dest="account_limits", action="store_false",
-                        help="don't use the Claude login; use local token counts only")
+                        help="without Omarchy's records, don't use the Claude login")
+    parser.add_argument("--no-omarchy", dest="omarchy", action="store_false",
+                        help="don't use Omarchy's usage records or run its collectors")
     parser.add_argument("--anthropic-api", action="store_true")
     parser.add_argument("--openai-api", action="store_true")
     parser.add_argument("--block-budget", type=int, default=0, help="5-hour token budget for local gauges")

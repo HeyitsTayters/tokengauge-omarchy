@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "dev.tayters.tokengauge",
   "name": "TokenGauge",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "tayters",
   "license": "MIT",
-  "description": "Claude Code and Codex plan limits as colored bar badges, with token usage by day and model.",
+  "description": "Plan limits for Claude Code, Codex and every other agent Omarchy tracks as colored bar badges, with token usage by day and model.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,9 +14,91 @@
   },
   "barWidget": {
     "displayName": "TokenGauge",
-    "description": "Session and weekly limits per tool at a glance, colored green, yellow and red. Click for token usage by day and model, right-click to refresh.",
+    "description": "Session and weekly limits per agent at a glance, colored green, yellow and red. Click for token usage by day and model and to choose which agents show, right-click to refresh.",
     "category": "AI",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "schema": [
+      {
+        "key": "display",
+        "type": "enum",
+        "label": "Bar display",
+        "options": [
+          "badges",
+          "highest",
+          "tokens",
+          "icon"
+        ],
+        "defaultValue": "badges"
+      },
+      {
+        "key": "warnPercent",
+        "type": "integer",
+        "label": "Warning level (%)",
+        "min": 50,
+        "max": 100,
+        "step": 5,
+        "defaultValue": 80
+      },
+      {
+        "key": "refreshSeconds",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 15,
+        "max": 3600,
+        "step": 15,
+        "defaultValue": 60
+      },
+      {
+        "key": "omarchyAgents",
+        "type": "boolean",
+        "label": "Use Omarchy's agent usage data",
+        "defaultValue": true
+      },
+      {
+        "key": "claude",
+        "type": "boolean",
+        "label": "Track Claude Code",
+        "defaultValue": true
+      },
+      {
+        "key": "codex",
+        "type": "boolean",
+        "label": "Track Codex",
+        "defaultValue": true
+      },
+      {
+        "key": "accountLimits",
+        "type": "boolean",
+        "label": "Claude plan limits",
+        "defaultValue": true
+      },
+      {
+        "key": "blockBudget",
+        "type": "integer",
+        "label": "5-hour token budget",
+        "min": 0,
+        "defaultValue": 0
+      },
+      {
+        "key": "weeklyBudget",
+        "type": "integer",
+        "label": "7-day token budget",
+        "min": 0,
+        "defaultValue": 0
+      },
+      {
+        "key": "anthropicApi",
+        "type": "boolean",
+        "label": "Anthropic org usage",
+        "defaultValue": false
+      },
+      {
+        "key": "openaiApi",
+        "type": "boolean",
+        "label": "OpenAI org usage",
+        "defaultValue": false
+      }
+    ]
   }
 }

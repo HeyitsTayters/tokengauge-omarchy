@@ -26,6 +26,7 @@ Panel {
   property var expanded: ({})
 
   readonly property var providers: snapshot.providers || []
+  readonly property var agents: snapshot.agents || []
   readonly property bool loaded: snapshot.providers !== undefined
   readonly property string display: setting("display", "badges")
   readonly property real warnPercent: Number(setting("warnPercent", 80))
@@ -38,6 +39,8 @@ Panel {
 
   readonly property string gaugeGlyph: String.fromCodePoint(0xf029a)    // md-gauge
   readonly property string refreshGlyph: String.fromCodePoint(0xf0450)  // md-refresh
+  readonly property string shownGlyph: String.fromCodePoint(0xf0132)    // md-checkbox-marked
+  readonly property string hiddenGlyph: String.fromCodePoint(0xf0131)   // md-checkbox-blank-outline
 
   // ---- theme colors
   // The shell exposes red as `urgent` but not green or yellow, so take those
@@ -117,20 +120,24 @@ Panel {
     return list
   }
 
-  // One badge per local tool with its session and weekly % (the first two
-  // limit windows), or its current token count when no limits are known.
+  function isOrgApi(id) { return id === "anthropicAPI" || id === "openAIAPI" }
+
+  // One badge per agent with its session and weekly % (the first two limit
+  // windows), or its current token count when no limits are known. An agent
+  // with no limits stays off the bar on days it isn't used.
   readonly property var badges: {
     var list = []
     for (var i = 0; i < providers.length; i++) {
       var p = providers[i]
-      if ((p.id !== "claudeCode" && p.id !== "codex") || p.error) continue
+      if (isOrgApi(p.id) || p.error) continue
       var percents = knownPercents(p).slice(0, 2)
+      if (percents.length === 0 && p.id !== "claudeCode" && p.id !== "codex" && p.today.billable === 0) continue
       var fallback = ""
       if (percents.length === 0) {
         var first = (p.limits || [])[0]
         fallback = first && first.detail ? first.detail.replace(" tokens", "") : formatTokens(p.today.billable)
       }
-      list.push({ id: p.id, percents: percents, fallback: fallback })
+      list.push({ id: p.id, name: p.name, percents: percents, fallback: fallback })
     }
     return list
   }
@@ -157,24 +164,18 @@ Panel {
   }
 
   // Names and numbers only: Omarchy's tooltip isn't ours to make plain text,
-  // so nothing that came from a log or a server goes in it.
+  // so nothing that came from a log or a server goes in it. The backend strips
+  // agent names down to safe characters.
   readonly property string tooltip: {
     var lines = ["TokenGauge"]
     for (var i = 0; i < providers.length; i++) {
       var p = providers[i]
-      if (p.error || (p.id !== "claudeCode" && p.id !== "codex" && p.id !== "anthropicAPI" && p.id !== "openAIAPI")) continue
+      if (p.error) continue
       var percents = knownPercents(p).slice(0, 2).map(formatPercent)
-      if (percents.length > 0) lines.push(strings.t("bar.limits").arg(displayName(p.id)).arg(percents.join(" / ") + "%"))
+      if (percents.length > 0) lines.push(strings.t("bar.limits").arg(p.name).arg(percents.join(" / ") + "%"))
     }
     lines.push(strings.t("bar.tokensToday").arg(formatTokens(tokensToday)))
     return lines.join("\n")
-  }
-
-  function displayName(id) {
-    if (id === "claudeCode") return "Claude Code"
-    if (id === "codex") return "Codex"
-    if (id === "anthropicAPI") return "Anthropic API"
-    return "OpenAI API"
   }
 
   // ---- backend
@@ -187,6 +188,7 @@ Panel {
     if (!setting("claude", true)) command.push("--no-claude")
     if (!setting("codex", true)) command.push("--no-codex")
     if (!setting("accountLimits", true)) command.push("--no-account-limits")
+    if (!setting("omarchyAgents", true)) command.push("--no-omarchy")
     if (setting("anthropicApi", false)) command.push("--anthropic-api")
     if (setting("openaiApi", false)) command.push("--openai-api")
     command.push("--block-budget", String(Number(setting("blockBudget", 0)) || 0))
@@ -199,6 +201,17 @@ Panel {
   onBackendKeyChanged: if (watcher.running) watcher.running = false
 
   function refresh() { if (watcher.running) watcher.write("refresh\n") }
+
+  function toggleExpanded(key) {
+    var next = Object.assign({}, expanded)
+    next[key] = expanded[key] !== true
+    expanded = next
+  }
+
+  // The backend answers with a new snapshot, which moves the checkbox.
+  function setAgentHidden(id, hidden) {
+    if (watcher.running) watcher.write((hidden ? "hide " : "show ") + id + "\n")
+  }
 
   onOpenedChanged: if (opened) refresh()
 
@@ -244,6 +257,8 @@ Panel {
     function close(): void { root.close() }
     function toggle(): void { root.toggle() }
     function refresh(): void { root.refresh() }
+    function hide(id: string): void { root.setAgentHidden(id, true) }
+    function show(id: string): void { root.setAgentHidden(id, false) }
     function status(): string { return JSON.stringify(root.snapshot) }
   }
 
@@ -295,6 +310,7 @@ Panel {
 
           ToolGlyph {
             provider: badge.modelData.id
+            name: badge.modelData.name
           }
 
           BarText {
@@ -371,7 +387,10 @@ Panel {
       }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onTextKey: function(t) { if (t === "r" || t === "R") root.refresh() }
+      onTextKey: function(t) {
+        if (t === "r" || t === "R") root.refresh()
+        if (t === "a" || t === "A") root.toggleExpanded("__agents")
+      }
 
       ScrollView {
         id: scrollArea
@@ -418,6 +437,11 @@ Panel {
             }
           }
 
+          AgentList {
+            visible: root.agents.length > 0
+            width: parent.width
+          }
+
           PlainLabel {
             visible: root.backendDown || (root.loaded && root.providers.length === 0)
             width: parent.width
@@ -458,18 +482,21 @@ Panel {
   }
 
   // Hand-drawn marks in the style of Claude and ChatGPT, tuned to stay legible
-  // at bar size.
+  // at bar size. Any other agent gets its initial in a ring.
   component ToolGlyph: Canvas {
     id: glyph
     property string provider: ""
+    property string name: ""
     property color tint: root.fg
     readonly property bool spark: provider === "claudeCode" || provider === "anthropicAPI"
+    readonly property bool knot: provider === "codex" || provider === "openAIAPI"
 
     width: Style.space(16)
     height: width
 
     onTintChanged: requestPaint()
     onProviderChanged: requestPaint()
+    onNameChanged: requestPaint()
     onWidthChanged: requestPaint()
 
     onPaint: {
@@ -499,6 +526,15 @@ Panel {
           ctx.closePath()
           ctx.fill()
         }
+      } else if (!knot) {
+        ctx.lineWidth = r * 0.14
+        ctx.beginPath()
+        ctx.arc(0, 0, r * 0.90, 0, Math.PI * 2)
+        ctx.stroke()
+        ctx.font = "bold " + Math.round(r * 1.1) + "px sans-serif"
+        ctx.textAlign = "center"
+        ctx.textBaseline = "middle"
+        ctx.fillText(name.charAt(0).toUpperCase(), 0, r * 0.06)
       } else {
         // Six rounded links, 60° apart and offset from center, interlock.
         ctx.lineWidth = r * 0.13
@@ -641,6 +677,64 @@ Panel {
     }
   }
 
+  // Every agent found on this machine, shown or not, so a hidden one can come
+  // back. The choice lives with the backend, not in shell.json.
+  component AgentList: Column {
+    id: agentList
+    readonly property bool open: root.expanded.__agents === true
+    spacing: Style.space(4)
+
+    Item {
+      width: parent.width
+      height: agentsToggle.implicitHeight
+
+      PlainLabel {
+        id: agentsToggle
+        text: (agentList.open ? "▾ " : "▸ ") + strings.t("panel.agents")
+        color: root.dimFg
+      }
+
+      MouseArea {
+        anchors.fill: parent
+        cursorShape: Qt.PointingHandCursor
+        onClicked: root.toggleExpanded("__agents")
+      }
+    }
+
+    Repeater {
+      model: agentList.open ? root.agents : []
+
+      Item {
+        id: agentRow
+        required property var modelData
+        width: agentList.width
+        height: agentName.implicitHeight + Style.space(4)
+
+        Row {
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(6)
+
+          PlainLabel {
+            text: agentRow.modelData.hidden ? root.hiddenGlyph : root.shownGlyph
+            color: agentRow.modelData.hidden ? root.dimFg : Color.accent
+          }
+
+          PlainLabel {
+            id: agentName
+            text: agentRow.modelData.name
+            color: agentRow.modelData.hidden ? root.dimFg : root.fg
+          }
+        }
+
+        MouseArea {
+          anchors.fill: parent
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.setAgentHidden(agentRow.modelData.id, !agentRow.modelData.hidden)
+        }
+      }
+    }
+  }
+
   component ProviderCard: Rectangle {
     id: card
     property var provider: ({})
@@ -671,6 +765,7 @@ Panel {
           id: cardGlyph
           anchors.verticalCenter: parent.verticalCenter
           provider: card.provider.id || ""
+          name: card.provider.name || ""
         }
 
         PlainLabel {
@@ -678,7 +773,7 @@ Panel {
           anchors.left: cardGlyph.right
           anchors.leftMargin: Style.space(6)
           anchors.verticalCenter: parent.verticalCenter
-          text: root.displayName(card.provider.id)
+          text: card.provider.name || ""
           font.pixelSize: Style.font.body
           font.bold: true
         }
@@ -744,7 +839,7 @@ Panel {
       }
 
       Item {
-        visible: !card.hasError
+        visible: !card.hasError && card.provider.breakdown !== false
         width: parent.width
         height: breakdownToggle.implicitHeight
 
@@ -757,16 +852,12 @@ Panel {
         MouseArea {
           anchors.fill: parent
           cursorShape: Qt.PointingHandCursor
-          onClicked: {
-            var next = Object.assign({}, root.expanded)
-            next[card.provider.id] = !card.open
-            root.expanded = next
-          }
+          onClicked: root.toggleExpanded(card.provider.id)
         }
       }
 
       Column {
-        visible: !card.hasError && card.open
+        visible: !card.hasError && card.open && card.provider.breakdown !== false
         width: parent.width
         spacing: Style.space(2)
 

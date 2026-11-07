@@ -145,6 +145,159 @@ class Account(unittest.TestCase):
         self.assertEqual(account.path.stat().st_mode & 0o777, 0o600)
 
 
+def record(agent="claude", **fields):
+    return {"schemaVersion": 1, "id": agent, "name": "Claude Code", "ready": True, "tierLabel": "Pro",
+            "limits": [{"label": "Session", "percent": 0.25, "resetsAt": "2099-01-01T00:00:00+00:00"}],
+            "limitsFetchedAt": 0, **fields}
+
+
+def options(**fields):
+    values = {"claude": True, "codex": True, "omarchy": True, "account_limits": True, "anthropic_api": False,
+              "openai_api": False, "block_budget": 0, "weekly_budget": 0, **fields}
+    return mock.Mock(**values)
+
+
+class Records(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        root = Path(self.dir.name)
+        patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state"),
+                                               "XDG_CACHE_HOME": str(root / "cache"),
+                                               "CLAUDE_CONFIG_DIR": str(root / "claude"),
+                                               "CODEX_HOME": str(root / "codex")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        (root / "claude" / "projects").mkdir(parents=True)
+        (root / "codex" / "sessions").mkdir(parents=True)
+        self.folder = root / "state" / "omarchy" / "agents" / "usage"
+        self.folder.mkdir(parents=True)
+
+    def write(self, value):
+        (self.folder / f"{value['id']}.json").write_text(json.dumps(value))
+
+    def collector(self, **fields):
+        collector = tg.Collector(options(**fields))
+        collector.usage.command = None
+        return collector
+
+    def test_fractions_become_percents(self):
+        self.assertEqual(tg.record_limits(record(), time.time())[0]["percent"], 25)
+
+    def test_window_past_its_reset_reads_zero(self):
+        value = record(limits=[{"label": "Session", "percent": 0.9, "resetsAt": "2001-01-01T00:00:00+00:00"}])
+        self.assertEqual(tg.record_limits(value, time.time())[0]["percent"], 0)
+
+    def test_bad_limits_are_skipped(self):
+        value = record(limits=["x", {"percent": "1"}, {"percent": True}, {"percent": -1}])
+        self.assertEqual(tg.record_limits(value, time.time()), [])
+
+    def test_record_replaces_the_login(self):
+        self.write(record())
+        collector = self.collector()
+        with mock.patch.object(tg.ClaudeAccount, "fetch") as fetch:
+            claude = collector.collect()["providers"][0]
+        fetch.assert_not_called()
+        self.assertEqual(claude["limits"][0]["percent"], 25)
+        self.assertEqual(claude["note"], "Plan: Pro")
+
+    def test_record_without_limits_still_keeps_us_off_the_endpoint(self):
+        self.write(record(limits=[], usageStatusText="Rate-limited"))
+        collector = self.collector()
+        with mock.patch.object(tg.ClaudeAccount, "fetch") as fetch:
+            claude = collector.collect()["providers"][0]
+        fetch.assert_not_called()
+        self.assertEqual(claude["note"], "Plan: Pro · Rate-limited")
+
+    def test_no_record_falls_back_to_the_login(self):
+        collector = self.collector()
+        with mock.patch.object(tg.ClaudeAccount, "fetch", return_value=([tg.limit("S", 40)], "n")) as fetch:
+            claude = collector.collect()["providers"][0]
+        fetch.assert_called_once()
+        self.assertEqual(claude["limits"][0]["percent"], 40)
+
+    def test_account_limits_off_ignores_the_record(self):
+        self.write(record())
+        collector = self.collector(account_limits=False)
+        with mock.patch.object(tg.ClaudeAccount, "fetch") as fetch:
+            claude = collector.collect()["providers"][0]
+        fetch.assert_not_called()
+        self.assertEqual(claude["limits"][0]["percent"], -1)
+
+    def test_omarchy_off_reads_nothing(self):
+        self.write(record("grok", name="Grok"))
+        ids = [p["id"] for p in self.collector(omarchy=False).collect()["providers"]]
+        self.assertEqual(ids, ["claudeCode", "codex"])
+
+    def test_other_agents_appear_and_unused_ones_do_not(self):
+        today = tg.date.today().isoformat()
+        self.write(record("opencode", name="Open<b>Code", limits=[], recentDays=[{"date": today, "messageCount": 900}],
+                          todayTokensByModel={"m": 900}))
+        self.write(record("kimi", name="Kimi", ready=False, limits=[]))
+        snap = self.collector().collect()
+        agent = snap["providers"][2]
+        self.assertEqual((agent["id"], agent["name"]), ("opencode", "OpenbCode"))
+        self.assertEqual(agent["today"]["billable"], 900)
+        self.assertEqual(agent["topModels"], [{"name": "m", "tokens": 900}])
+        self.assertEqual([a["id"] for a in snap["agents"]], ["claudeCode", "codex", "opencode"])
+
+    def test_yesterdays_record_counts_nothing_today(self):
+        yesterday = (tg.date.today() - tg.timedelta(days=1)).isoformat()
+        value = record("grok", recentDays=[{"date": yesterday, "messageCount": 5}], todayTokensByModel={"m": 5})
+        agent = tg.record_agent(value, time.time())
+        self.assertEqual((agent["today"]["total"], agent["week"]["total"], agent["topModels"]), (0, 5, []))
+
+    def test_mismatched_or_damaged_records_are_ignored(self):
+        (self.folder / "a.json").write_text("{")
+        (self.folder / "b.json").write_text(json.dumps(record("other")))
+        (self.folder / "c.json").write_text(json.dumps({**record("c"), "schemaVersion": 2}))
+        self.assertEqual(tg.OmarchyUsage().read(), {})
+
+    def test_hiding_an_agent_survives_a_new_backend_and_a_cache_wipe(self):
+        collector = self.collector()
+        with mock.patch.object(tg.ClaudeAccount, "fetch", side_effect=tg.Failure("x")) as fetch:
+            collector.command(b"hide claudeCode\n")
+            fresh = self.collector().collect()
+        fetch.assert_not_called()
+        self.assertEqual([p["id"] for p in fresh["providers"]], ["codex"])
+        self.assertEqual(fresh["agents"][0], {"id": "claudeCode", "name": "Claude Code", "hidden": True})
+        collector.command(b"show claudeCode\n")
+        self.assertEqual(tg.HiddenAgents().load(), set())
+
+    def test_bad_commands_change_nothing(self):
+        self.collector().command(b"refresh\nhide ../x\nhide a b\n\xff\n")
+        self.assertEqual(tg.HiddenAgents().load(), set())
+
+    def test_update_runs_once_and_skips_hidden_agents(self):
+        usage = tg.OmarchyUsage()
+        usage.command = "update"
+        other = tg.OmarchyUsage()
+        other.command = "update"
+        with mock.patch.object(tg.subprocess, "Popen") as popen:
+            popen.return_value.poll.return_value = 0
+            usage.update({"claude"}, time.time())
+            other.update(set(), time.time())
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args[0][0], ["update", "--except", "claude"])
+
+    def test_fresh_records_mean_no_update(self):
+        self.write(record())
+        usage = tg.OmarchyUsage()
+        usage.command = "update"
+        with mock.patch.object(tg.subprocess, "Popen") as popen:
+            usage.update(set(), time.time())
+        popen.assert_not_called()
+
+    def test_stale_records_do_update(self):
+        self.write(record())
+        os.utime(self.folder / "claude.json", (1000, 1000))
+        usage = tg.OmarchyUsage()
+        usage.command = "update"
+        with mock.patch.object(tg.subprocess, "Popen") as popen:
+            usage.update(set(), time.time())
+        popen.assert_called_once()
+
+
 class Logs(unittest.TestCase):
     def write(self, lines):
         handle = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
